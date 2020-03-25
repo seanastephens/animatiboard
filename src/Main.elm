@@ -5,7 +5,9 @@ import Browser.Events exposing (onKeyDown)
 import Canvas exposing (Point, Shape, rect, shapes)
 import Canvas.Settings exposing (Setting, fill, stroke)
 import Canvas.Settings.Advanced exposing (scale, transform, translate)
+import Canvas.Settings.Line exposing (lineWidth)
 import Color
+import Dict exposing (Dict)
 import Html exposing (Html, button, div, p)
 import Html.Attributes exposing (style)
 import Html.Events exposing (on, onClick)
@@ -85,18 +87,36 @@ type alias Shift =
 
 
 type alias Snapshot =
-    { rects : List Shape
+    { rects : Dict Int Rect
     , zoom : Float
     , shift : Shift
     }
 
 
+type SnapshotId
+    = SnapshotId Int
+
+
+type RectId
+    = RectId Int
+
+
+nextRectId : RectId -> ( Int, RectId )
+nextRectId (RectId n) =
+    ( n, RectId (n + 1) )
+
+
+nextSnapshotId : SnapshotId -> ( Int, SnapshotId )
+nextSnapshotId (SnapshotId n) =
+    ( n, SnapshotId (n + 1) )
+
+
 type alias Model =
-    { rects : List Shape
-    , currentRect : Maybe ( Rect, Shape )
-    , zoom : Float
-    , shift : Shift
-    , snapshots : List Snapshot
+    { currentRect : Maybe Rect
+    , currentSnapshot : SnapshotId
+    , nextRectId : RectId
+    , nextSnapshotId : SnapshotId
+    , snapshots : Dict Int Snapshot
     , animating : Maybe Int
     }
 
@@ -108,18 +128,19 @@ type Msg
     | IncreaseZoom
     | DecreaseZoom
     | KeyPress Arrow
-    | TakeSnapshot
+    | MakeNewSnapshot
+    | SelectSnapshot Int
     | RunAnimation
     | AnimationFrame
 
 
 init : () -> ( Model, Cmd Msg )
 init _ =
-    ( { rects = []
+    ( { nextRectId = RectId 1
+      , nextSnapshotId = SnapshotId 2
+      , currentSnapshot = SnapshotId 1
       , currentRect = Nothing
-      , zoom = 1.0
-      , shift = { x = 0, y = 0 }
-      , snapshots = []
+      , snapshots = Dict.singleton 1 { rects = Dict.empty, zoom = 1.0, shift = { x = 0, y = 0 } }
       , animating = Nothing
       }
     , Cmd.none
@@ -148,120 +169,139 @@ screenToGlobal zoom shift ( x, y ) =
     ( (x - w / 2) / zoom - shift.x, (y - h / 2) / zoom - shift.y )
 
 
+updateCurrentSnapshot : Model -> (Snapshot -> Snapshot) -> Model
+updateCurrentSnapshot model f =
+    let
+        (SnapshotId currentSnapshotId) =
+            model.currentSnapshot
+    in
+    { model | snapshots = Dict.update currentSnapshotId (Maybe.map f) model.snapshots }
+
+
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg ({ currentRect } as model) =
-    ( case msg of
-        StartAt screenPoint ->
-            let
-                point =
-                    screenToGlobal model.zoom model.shift screenPoint
-            in
-            { model
-                | currentRect =
-                    Just
-                        ( { first = point, second = point }
-                        , rect point 0 0
-                        )
-            }
+    let
+        (SnapshotId currentSnapshotId) =
+            model.currentSnapshot
 
-        MoveAt screenPoint ->
-            case currentRect of
-                Just ( { first }, _ ) ->
-                    { model
-                        | currentRect =
-                            let
-                                point =
-                                    screenToGlobal model.zoom model.shift screenPoint
+        maybeCurrentSnapshot =
+            Dict.get currentSnapshotId model.snapshots
+    in
+    case maybeCurrentSnapshot of
+        Nothing ->
+            ( model, Cmd.none )
 
-                                ( x1, y1 ) =
-                                    first
-
-                                ( x2, y2 ) =
-                                    point
-                            in
-                            Just
-                                ( { first = first, second = point }
-                                , rect first (x2 - x1) (y2 - y1)
-                                )
-                    }
-
-                Nothing ->
-                    model
-
-        EndAt screenPoint ->
-            case currentRect of
-                Just ( { first }, _ ) ->
+        Just currentSnapshot ->
+            ( case msg of
+                StartAt screenPoint ->
                     let
                         point =
-                            screenToGlobal model.zoom model.shift screenPoint
-
-                        ( x1, y1 ) =
-                            first
-
-                        ( x2, y2 ) =
-                            point
+                            screenToGlobal currentSnapshot.zoom currentSnapshot.shift screenPoint
                     in
-                    { model | rects = rect first (x2 - x1) (y2 - y1) :: model.rects, currentRect = Nothing }
+                    { model
+                        | currentRect =
+                            Just { first = point, second = point }
+                    }
 
-                Nothing ->
-                    model
+                MoveAt screenPoint ->
+                    case currentRect of
+                        Just { first } ->
+                            { model
+                                | currentRect =
+                                    let
+                                        point =
+                                            screenToGlobal currentSnapshot.zoom currentSnapshot.shift screenPoint
+                                    in
+                                    Just { first = first, second = point }
+                            }
 
-        IncreaseZoom ->
-            { model | zoom = model.zoom * 1.1 }
+                        Nothing ->
+                            model
 
-        DecreaseZoom ->
-            { model | zoom = model.zoom / 1.1 }
+                EndAt screenPoint ->
+                    case currentRect of
+                        Just { first } ->
+                            let
+                                point =
+                                    screenToGlobal currentSnapshot.zoom currentSnapshot.shift screenPoint
 
-        KeyPress arrow ->
-            let
-                ( dx, dy ) =
-                    case arrow of
-                        Up ->
-                            ( 0, 5 )
+                                newRect =
+                                    { first = first, second = point }
 
-                        Down ->
-                            ( 0, -5 )
+                                ( rectIdToInsert, nextRectIdInModel ) =
+                                    nextRectId model.nextRectId
 
-                        Left ->
-                            ( 5, 0 )
+                                modelWithNewRect =
+                                    updateCurrentSnapshot model (\snap -> { snap | rects = Dict.insert rectIdToInsert newRect snap.rects })
+                            in
+                            { modelWithNewRect
+                                | nextRectId = nextRectIdInModel
+                                , currentRect = Nothing
+                            }
 
-                        Right ->
-                            ( -5, 0 )
+                        Nothing ->
+                            model
 
-                        Other ->
-                            ( 0, 0 )
-            in
-            { model | shift = { x = model.shift.x + dx, y = model.shift.y + dy } }
+                IncreaseZoom ->
+                    updateCurrentSnapshot model (\snap -> { snap | zoom = snap.zoom * 1.1 })
 
-        TakeSnapshot ->
-            { model
-                | snapshots =
-                    model.snapshots
-                        ++ [ { rects = model.rects
-                             , zoom = model.zoom
-                             , shift = model.shift
-                             }
-                           ]
-            }
+                DecreaseZoom ->
+                    updateCurrentSnapshot model (\snap -> { snap | zoom = snap.zoom / 1.1 })
 
-        RunAnimation ->
-            { model
-                | animating = Just -60
-            }
+                KeyPress arrow ->
+                    let
+                        ( dx, dy ) =
+                            case arrow of
+                                Up ->
+                                    ( 0, 5 )
 
-        AnimationFrame ->
-            case model.animating of
-                Just f ->
-                    if f == List.length model.snapshots * 60 then
-                        { model | animating = Nothing }
+                                Down ->
+                                    ( 0, -5 )
 
-                    else
-                        { model | animating = Just (f + 1) }
+                                Left ->
+                                    ( 5, 0 )
 
-                Nothing ->
-                    model
-    , Cmd.none
-    )
+                                Right ->
+                                    ( -5, 0 )
+
+                                Other ->
+                                    ( 0, 0 )
+                    in
+                    updateCurrentSnapshot model (\snap -> { snap | shift = { x = snap.shift.x + dx, y = snap.shift.y + dy } })
+
+                MakeNewSnapshot ->
+                    let
+                        ( idForNewSnapshot, nextSnapshotIdInModel ) =
+                            nextSnapshotId model.nextSnapshotId
+                    in
+                    { model
+                        | snapshots = Dict.insert idForNewSnapshot currentSnapshot model.snapshots
+                        , currentSnapshot = SnapshotId idForNewSnapshot
+                        , nextSnapshotId = nextSnapshotIdInModel
+                        , currentRect = Nothing
+                    }
+
+                SelectSnapshot id ->
+                    { model | currentSnapshot = SnapshotId id, currentRect = Nothing }
+
+                RunAnimation ->
+                    { model
+                        | animating = Just -60
+                    }
+
+                AnimationFrame ->
+                    case model.animating of
+                        Just f ->
+                            if f == Dict.size model.snapshots * 60 then
+                                { model | animating = Nothing }
+
+                            else
+                                { model | animating = Just (f + 1) }
+
+                        Nothing ->
+                            model
+            , Cmd.none
+            )
 
 
 mouseDown : Decode.Decoder Msg
@@ -285,10 +325,59 @@ mouseMove =
         (Decode.field "offsetY" Decode.int)
 
 
-view : Model -> Html Msg
-view { rects, currentRect, zoom, shift, snapshots, animating } =
+popIn : Rect -> Float -> Rect
+popIn { first, second } t =
     let
-        ( r, s, z ) =
+        -- todo: add easing
+        s =
+            t * t * t
+
+        ( ( x0, y0 ), ( x1, y1 ) ) =
+            ( first, second )
+
+        centerX =
+            (x0 + x1) / 2
+
+        centerY =
+            (y0 + y1) / 2
+
+        tfirst =
+            ( x0 * s + centerX * (1 - s)
+            , y0 * s + centerY * (1 - s)
+            )
+
+        tsecond =
+            ( x1 * s + centerX * (1 - s)
+            , y1 * s + centerY * (1 - s)
+            )
+    in
+    { first = tfirst, second = tsecond }
+
+
+popOut : Rect -> Float -> Rect
+popOut r t =
+    popIn r (1 - t)
+
+
+rectToCanvas : Rect -> Shape
+rectToCanvas { first, second } =
+    let
+        ( x1, y1 ) =
+            first
+
+        ( x2, y2 ) =
+            second
+    in
+    rect first (x2 - x1) (y2 - y1)
+
+
+view : Model -> Html Msg
+view { currentRect, snapshots, animating, currentSnapshot } =
+    let
+        (SnapshotId currentSnapshotId) =
+            currentSnapshot
+
+        { rects, shift, zoom } =
             case animating of
                 Just frame ->
                     let
@@ -305,10 +394,10 @@ view { rects, currentRect, zoom, shift, snapshots, animating } =
                             1 - frac
 
                         from =
-                            List.head (List.drop i snapshots)
+                            List.head (List.drop i (Dict.values snapshots))
 
                         to =
-                            List.head (List.drop (i + 1) snapshots)
+                            List.head (List.drop (i + 1) (Dict.values snapshots))
                     in
                     case ( from, to ) of
                         ( Just f, Just t ) ->
@@ -320,22 +409,39 @@ view { rects, currentRect, zoom, shift, snapshots, animating } =
 
                                 zft =
                                     f.zoom * fraci + t.zoom * frac
+
+                                rft =
+                                    Dict.merge
+                                        -- out
+                                        (\k fr m -> Dict.insert k (popOut fr frac) m)
+                                        -- transform
+                                        (\k fr tr m -> Dict.insert k fr m)
+                                        -- in
+                                        (\k fr m -> Dict.insert k (popIn fr frac) m)
+                                        f.rects
+                                        t.rects
+                                        Dict.empty
                             in
-                            ( f.rects, sft, zft )
+                            { rects = rft, shift = sft, zoom = zft }
 
                         ( Just f, Nothing ) ->
-                            ( f.rects, f.shift, f.zoom  )
+                            f
 
                         _ ->
-                            ( [], { x = 0, y = 0 }, 1 )
+                            { rects = Dict.empty, shift = { x = 0, y = 0 }, zoom = 1 }
 
                 Nothing ->
-                    case currentRect of
-                        Just ( _, cur ) ->
-                            ( cur :: rects, shift, zoom )
+                    case Dict.get currentSnapshotId snapshots of
+                        Just currentSnap ->
+                            case currentRect of
+                                Just curRect ->
+                                    { currentSnap | rects = Dict.insert -1 curRect currentSnap.rects }
+
+                                Nothing ->
+                                    currentSnap
 
                         Nothing ->
-                            ( rects, shift, zoom )
+                            { rects = Dict.empty, shift = { x = 0, y = 0 }, zoom = 1 }
     in
     div []
         [ p [ style "text-align" "center", style "font-size" "80%" ]
@@ -347,7 +453,7 @@ view { rects, currentRect, zoom, shift, snapshots, animating } =
                 , on "mousemove" mouseMove
                 , on "mouseup" mouseUp
                 ]
-                [ shapes [ fill Color.white ] [ rect ( 0, 0 ) w h ], shapes (canvasStyle z s) r ]
+                [ shapes [ fill Color.white, lineWidth zoom ] [ rect ( 0, 0 ) w h ], shapes (canvasStyle zoom shift) (List.map rectToCanvas <| Dict.values rects) ]
             ]
         , div []
             [ button [ onClick IncreaseZoom ] [ Html.text "Zoom in" ]
@@ -355,9 +461,27 @@ view { rects, currentRect, zoom, shift, snapshots, animating } =
             , Html.text ("Zoom is " ++ String.fromFloat zoom)
             ]
         , div []
-            [ button [ onClick TakeSnapshot ] [ Html.text "Save" ]
-            , Html.text (String.fromInt (List.length snapshots) ++ " snapshots")
+            [ button [ onClick MakeNewSnapshot ] [ Html.text "Make new slide" ]
+            , Html.text (String.fromInt (Dict.size snapshots) ++ " slides so far.")
             ]
+        , div [] <|
+            List.map
+                (\id ->
+                    button
+                        [ onClick (SelectSnapshot id) ]
+                        [ Html.span
+                            [ style "color"
+                                (if id == currentSnapshotId then
+                                    "blue"
+
+                                 else
+                                    "black"
+                                )
+                            ]
+                            [ Html.text ("Snapshot " ++ String.fromInt id) ]
+                        ]
+                )
+                (Dict.keys snapshots)
         , div []
             [ button [ onClick RunAnimation ] [ Html.text "Animate" ]
             ]
