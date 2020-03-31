@@ -24,6 +24,7 @@ main =
         }
 
 
+subs : Model -> Sub Msg
 subs _ =
     Sub.batch
         [ onKeyDown decodeKeyPress
@@ -328,9 +329,8 @@ mouseMove =
 popIn : Rect -> Float -> Rect
 popIn { first, second } t =
     let
-        -- todo: add easing
         s =
-            t * t * t
+            t
 
         ( ( x0, y0 ), ( x1, y1 ) ) =
             ( first, second )
@@ -415,7 +415,7 @@ view { currentRect, snapshots, animating, currentSnapshot } =
                                         -- out
                                         (\k fr m -> Dict.insert k (popOut fr frac) m)
                                         -- transform
-                                        (\k fr tr m -> Dict.insert k fr m)
+                                        (\k fr _ m -> Dict.insert k fr m)
                                         -- in
                                         (\k fr m -> Dict.insert k (popIn fr frac) m)
                                         f.rects
